@@ -1,11 +1,12 @@
 import express from "express";
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
+import { spawn } from "child_process";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let browserPromise; // 🔥 global browser instance
+let browserPromise;
 
 async function getBrowser() {
   if (!browserPromise) {
@@ -14,7 +15,7 @@ async function getBrowser() {
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
-      userDataDir: "/tmp/chrome-user-data", // important for ETXTBSY fix
+      userDataDir: "/tmp/chrome-user-data",
     });
   }
   return browserPromise;
@@ -25,55 +26,46 @@ app.get("/cdn", async (req, res) => {
   if (!url) return res.status(400).json({ error: "Valid URL required" });
 
   try {
-    const browser = await getBrowser(); // reuse browser
+    const browser = await getBrowser();
     const page = await browser.newPage();
 
-    let resolved = false;
-    let links = [];
+    let videoUrl = null;
+    let audioUrl = null;
 
     page.on("request", (reqEvent) => {
-      let link = reqEvent.url();
+      const link = reqEvent.url();
 
-      if (link.includes("videoplayback") && link.includes("expire=")) {
-        if (!links.includes(link)) links.push(link);
-      }
-
-      if (
-        (link.includes("cdninstagram.com") || link.includes("fbcdn.net")) &&
-        link.includes(".mp4")
-      ) {
-        link = link.replace(/&bytestart=\d+&byteend=\d+/g, "");
-        if (!links.includes(link)) links.push(link);
-      }
-
-      if (links.length >= 4 && !resolved) {
-        resolved = true;
-        page.close(); // ✅ sirf page band karo, browser mat
-        return res.json({ links: links.slice(0, 4) });
-      }
-    });
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        page.close();
-        if (links.length > 0) {
-          res.json({ links: links.slice(0, 4) });
+      if (link.includes("cdninstagram.com") && link.includes(".mp4")) {
+        if (link.includes("bytestart=0")) {
+          // Usually video-only
+          videoUrl = link.replace(/&bytestart=\d+&byteend=\d+/g, "");
         } else {
-          res.status(404).json({ error: "Video link not found" });
+          // Usually audio-only
+          audioUrl = link.replace(/&bytestart=\d+&byteend=\d+/g, "");
         }
       }
-    }, 10000);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
-app.listen(PORT, () =>
-  console.log(`✅ Server running http://localhost:${PORT}`)
-);
+      if (videoUrl && audioUrl) {
+        page.close();
+        // FFmpeg merge call
+        res.setHeader("Content-Type", "video/mp4");
+        res.setHeader("Content-Disposition", "attachment; filename=video.mp4");
+
+        const ffmpeg = spawn("ffmpeg", [
+          "-i", videoUrl,
+          "-i", audioUrl,
+          "-c", "copy",
+          "-f", "mp4",
+          "pipe:1",
+        ]);
+
+        ffmpeg.stdout.pipe(res);
+        ffmpeg.stderr.on("data", (d) => console.error("FFmpeg:", d.toString()));
+        ffmpeg.on("close", () => console.log("✅ Merge complete"));
+      }
+    });
+
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    setTimeout(() => {
+      if (!videoUrl
