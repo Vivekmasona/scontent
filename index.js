@@ -4,42 +4,65 @@ import axios from "axios";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/", (req, res) => {
-  res.send("Instagram CDN Extractor API is running 🚀");
-});
+app.get("/", (_, res) => res.send("IG CDN Extractor running ✅"));
+
+// Function to decode escape characters
+function decode(str) {
+  return str.replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+}
 
 app.get("/cdn", async (req, res) => {
   const { url } = req.query;
-  if (!url) return res.status(400).json({ error: "URL is required" });
+  if (!url) return res.status(400).json({ error: "url required" });
 
   try {
-    const response = await axios.get(url, {
+    const { data: html } = await axios.get(url, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
       },
     });
 
-    const html = response.data;
+    let cdn = null;
 
-    // try to match video_url first
-    let match = html.match(/"video_url":"([^"]+)"/);
-    if (!match) {
-      // fallback to display_url (for images)
-      match = html.match(/"display_url":"([^"]+)"/);
+    // 1️⃣ First try ld+json
+    const ldJsonMatch = html.match(
+      /<script type="application\/ld\+json">([\s\S]*?)<\/script>/
+    );
+    if (ldJsonMatch) {
+      try {
+        const ldJson = JSON.parse(ldJsonMatch[1]);
+        if (ldJson.video && ldJson.video.contentUrl) {
+          cdn = ldJson.video.contentUrl;
+        } else if (ldJson.image && ldJson.image[0]) {
+          cdn = ldJson.image[0];
+        }
+      } catch (e) {
+        console.error("ld+json parse fail:", e.message);
+      }
     }
 
-    if (match) {
-      const cdnUrl = match[1].replace(/\\u0026/g, "&");
-      return res.json({ cdn: cdnUrl });
+    // 2️⃣ Fallback: video_url or display_url regex
+    if (!cdn) {
+      let match =
+        html.match(/"video_url":"([^"]+)"/) ||
+        html.match(/"display_url":"([^"]+)"/);
+      if (match) cdn = decode(match[1]);
     }
 
-    return res.status(404).json({ error: "CDN link not found" });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
+    if (!cdn) {
+      return res.status(404).json({ error: "CDN link not found" });
+    }
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    return res.json({ cdn });
+  } catch (e) {
+    return res.status(500).json({ error: "fetch_failed", detail: e.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server listening on", PORT);
 });
