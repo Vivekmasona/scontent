@@ -1,14 +1,13 @@
 {
-  "name": "instagram-cdn-extractor",
+  "name": "puppeteer-extractor",
   "version": "1.0.0",
-  "description": "Instagram CDN extractor API (without Puppeteer)",
-  "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.0",
-    "express": "^4.19.0"
+    "@sparticuz/chromium": "^127.0.0",
+    "express": "^4.18.2",
+    "puppeteer-core": "^22.15.0"
   }
 }
