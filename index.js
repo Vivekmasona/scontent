@@ -20,7 +20,6 @@ async function getBrowser() {
   return browserPromise;
 }
 
-// List of priority domains
 const PRIORITY_DOMAINS = [
   "youtube.com", "youtu.be",
   "scontent", "cdninstagram",
@@ -45,7 +44,7 @@ app.get("/extract", async (req, res) => {
       try {
         let link = response.url();
 
-        // Remove bytestart / byteend
+        // Remove &bytestart & byteend
         link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
@@ -54,7 +53,6 @@ app.get("/extract", async (req, res) => {
           }
         }
 
-        // XHR JSON responses
         if (response.request().resourceType() === "xhr") {
           try {
             const data = await response.json();
@@ -77,6 +75,7 @@ app.get("/extract", async (req, res) => {
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
+    // Wait max 30 seconds to collect responses
     setTimeout(async () => {
       if (!resolved) {
         resolved = true;
@@ -103,7 +102,7 @@ app.get("/extract", async (req, res) => {
           res.status(404).json({ error: "No audio/video found" });
         }
       }
-    }, 12000);
+    }, 30000); // 30 seconds
 
   } catch (err) {
     res.status(500).json({ error: err.message });
