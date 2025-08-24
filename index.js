@@ -20,6 +20,7 @@ async function getBrowser() {
   return browserPromise;
 }
 
+// Priority domains
 const PRIORITY_DOMAINS = [
   "youtube.com", "youtu.be",
   "scontent", "cdninstagram",
@@ -37,14 +38,13 @@ app.get("/extract", async (req, res) => {
     const browser = await getBrowser();
     const page = await browser.newPage();
 
-    let resolved = false;
     let results = [];
+    let resolved = false;
 
+    // Collect all network responses
     page.on("response", async (response) => {
       try {
         let link = response.url();
-
-        // Remove &bytestart & byteend
         link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
@@ -53,6 +53,7 @@ app.get("/extract", async (req, res) => {
           }
         }
 
+        // JSON XHR responses
         if (response.request().resourceType() === "xhr") {
           try {
             const data = await response.json();
@@ -75,7 +76,7 @@ app.get("/extract", async (req, res) => {
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
-    // Wait max 30 seconds to collect responses
+    // Wait max 30 seconds then respond
     setTimeout(async () => {
       if (!resolved) {
         resolved = true;
@@ -93,19 +94,17 @@ app.get("/extract", async (req, res) => {
           }
         });
 
-        results = [...priority, ...normal];
+        const finalResults = [...priority, ...normal];
 
         await page.close();
-        if (results.length > 0) {
-          res.json({ results });
-        } else {
-          res.status(404).json({ error: "No audio/video found" });
-        }
+        res.json({ results: finalResults });
       }
     }, 30000); // 30 seconds
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // Never send timeout, just return whatever collected
+    console.error("Error:", err.message);
+    res.json({ results: [] });
   }
 });
 
