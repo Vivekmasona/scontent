@@ -20,9 +20,9 @@ async function getBrowser() {
   return browserPromise;
 }
 
-// Priority domains
+// Priority domains (YouTube CDN skipped for deploy safety)
 const PRIORITY_DOMAINS = [
-  "youtube.com", "youtu.be", "googlevideo.com/videoplayback",
+  "youtube.com", "youtu.be",
   "scontent", "cdninstagram",
   "fbcdn.net", "facebook.com",
   "twitter.com", "twimg.com",
@@ -30,7 +30,7 @@ const PRIORITY_DOMAINS = [
   "vimeo.com"
 ];
 
-app.get("/cdn", async (req, res) => {
+app.get("/extract", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "Valid URL required" });
 
@@ -41,7 +41,7 @@ app.get("/cdn", async (req, res) => {
     let results = [];
     let resolved = false;
 
-    // Collect all network responses
+    // Listen to network responses
     page.on("response", async (response) => {
       try {
         let link = response.url();
@@ -49,7 +49,8 @@ app.get("/cdn", async (req, res) => {
 
         // Media file extensions
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
-          if (!results.find(r => r.url === link)) {
+          // Skip direct YouTube CDN URLs for deploy safety
+          if (!link.includes("googlevideo.com/videoplayback") && !results.find(r => r.url === link)) {
             results.push({ url: link, type: "media" });
           }
         }
@@ -63,13 +64,14 @@ app.get("/cdn", async (req, res) => {
             if (matches) {
               matches.forEach(l => {
                 l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
-                if (!results.find(r => r.url === l)) {
+                if (!l.includes("googlevideo.com/videoplayback") && !results.find(r => r.url === l)) {
                   results.push({ url: l, type: "json-extracted" });
                 }
               });
             }
           } catch {}
         }
+
       } catch (err) {
         console.error("Response parse error:", err.message);
       }
@@ -77,26 +79,14 @@ app.get("/cdn", async (req, res) => {
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
-    // Extract YouTube CDN URL from page content
-    try {
-      const content = await page.content();
-      const ytMatch = content.match(/"url":"(https:\\/\\/[^"]+\.googlevideo\.com\/videoplayback[^"]+)"/);
-      if (ytMatch) {
-        let ytUrl = ytMatch[1].replace(/\\u0026/g, "&");
-        if (!results.find(r => r.url === ytUrl)) {
-          results.push({ url: ytUrl, type: "youtube" });
-        }
-      }
-    } catch {}
-
-    // Wait max 30 seconds then respond
+    // Wait max 30 seconds and then respond
     setTimeout(async () => {
       if (!resolved) {
         resolved = true;
         const title = await page.title();
         results = results.map(r => ({ ...r, title: title || "Unknown" }));
 
-        // Sort: priority URLs first
+        // Sort: priority domains first
         const priority = [];
         const normal = [];
         results.forEach(r => {
@@ -112,7 +102,7 @@ app.get("/cdn", async (req, res) => {
         await page.close();
         res.json({ results: finalResults });
       }
-    }, 30000); // 30 seconds
+    }, 30000); // 30 sec
 
   } catch (err) {
     console.error("Error:", err.message);
