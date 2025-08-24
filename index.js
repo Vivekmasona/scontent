@@ -5,22 +5,22 @@ import puppeteer from "puppeteer-core";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let browser; // keep single browser
+let browserPromise;
 
 async function getBrowser() {
-  if (!browser) {
-    browser = await puppeteer.launch({
-      args: [...chromium.args, "--no-sandbox", "--disable-setuid-sandbox"],
+  if (!browserPromise) {
+    browserPromise = puppeteer.launch({
+      args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
-      userDataDir: "/tmp/chrome-user-data", // prevent ETXTBSY
+      userDataDir: "/tmp/chrome-user-data", // ETXTBSY fix
     });
   }
-  return browser;
+  return browserPromise;
 }
 
-app.get("/cdn", async (req, res) => {
+app.get("/extract", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "Valid URL required" });
 
@@ -31,45 +31,56 @@ app.get("/cdn", async (req, res) => {
     let resolved = false;
     let results = [];
 
-    // listen for network requests
-    page.on("request", (reqEvent) => {
-      let link = reqEvent.url();
+    // Listen all network responses
+    page.on("response", async (response) => {
+      try {
+        const link = response.url();
 
-      if ((link.includes("cdninstagram.com") || link.includes("fbcdn.net")) && link.match(/\.(mp4|m3u8)/)) {
-        link = link.replace(/&bytestart=\d+&byteend=\d+/g, "");
-        if (!results.find(r => r.url === link)) results.push({ url: link });
-      }
+        // Common audio/video extensions
+        if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
+          if (!results.find(r => r.url === link)) {
+            results.push({ url: link, type: "media" });
+          }
+        }
 
-      if (link.match(/\.(mp4|webm|m3u8)/i)) {
-        if (!results.find(r => r.url === link)) results.push({ url: link });
-      }
+        // Sometimes JSON contains streaming URLs
+        if (response.request().resourceType() === "xhr") {
+          try {
+            const data = await response.json();
+            const jsonStr = JSON.stringify(data);
 
-      if (results.length >= 5 && !resolved) {
-        resolved = true;
-        page.title().then(title => {
-          results = results.map(r => ({ ...r, title: title || "Unknown" }));
-          page.close().catch(() => {});
-          res.json({ results: results.slice(0, 5) });
-        });
+            // Look for media URLs inside JSON
+            const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
+            if (matches) {
+              matches.forEach(link => {
+                if (!results.find(r => r.url === link)) {
+                  results.push({ url: link, type: "json-extracted" });
+                }
+              });
+            }
+          } catch { /* ignore non-JSON */ }
+        }
+
+      } catch (err) {
+        console.error("Response parse error:", err.message);
       }
     });
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
-    // fallback timeout
     setTimeout(async () => {
       if (!resolved) {
         resolved = true;
-        const title = await page.title().catch(() => "Unknown");
-        results = results.map(r => ({ ...r, title }));
-        await page.close().catch(() => {});
+        const title = await page.title();
+        results = results.map(r => ({ ...r, title: title || "Unknown" }));
+        await page.close();
         if (results.length > 0) {
-          res.json({ results: results.slice(0, 5) });
+          res.json({ results });
         } else {
-          res.status(404).json({ error: "Video link not found" });
+          res.status(404).json({ error: "No audio/video found" });
         }
       }
-    }, 10000);
+    }, 12000);
 
   } catch (err) {
     res.status(500).json({ error: err.message });
