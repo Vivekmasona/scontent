@@ -34,7 +34,10 @@ app.get("/cdn", async (req, res) => {
     // Listen all network responses
     page.on("response", async (response) => {
       try {
-        const link = response.url();
+        let link = response.url();
+
+        // REMOVE &bytestart & byteend params
+        link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
         // Common audio/video extensions
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
@@ -43,18 +46,19 @@ app.get("/cdn", async (req, res) => {
           }
         }
 
-        // Sometimes JSON contains streaming URLs
+        // JSON XHR responses
         if (response.request().resourceType() === "xhr") {
           try {
             const data = await response.json();
             const jsonStr = JSON.stringify(data);
 
-            // Look for media URLs inside JSON
             const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
             if (matches) {
-              matches.forEach(link => {
-                if (!results.find(r => r.url === link)) {
-                  results.push({ url: link, type: "json-extracted" });
+              matches.forEach(l => {
+                // Remove bytestart/byteend from JSON URLs too
+                l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
+                if (!results.find(r => r.url === l)) {
+                  results.push({ url: l, type: "json-extracted" });
                 }
               });
             }
