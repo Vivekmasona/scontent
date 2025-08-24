@@ -20,7 +20,17 @@ async function getBrowser() {
   return browserPromise;
 }
 
-app.get("/cdn", async (req, res) => {
+// List of priority domains
+const PRIORITY_DOMAINS = [
+  "youtube.com", "youtu.be",
+  "scontent", "cdninstagram",
+  "fbcdn.net", "facebook.com",
+  "twitter.com", "twimg.com",
+  "soundcloud.com",
+  "vimeo.com"
+];
+
+app.get("/extract", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "Valid URL required" });
 
@@ -31,40 +41,35 @@ app.get("/cdn", async (req, res) => {
     let resolved = false;
     let results = [];
 
-    // Listen all network responses
     page.on("response", async (response) => {
       try {
         let link = response.url();
 
-        // REMOVE &bytestart & byteend params
+        // Remove bytestart / byteend
         link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
-        // Common audio/video extensions
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
           if (!results.find(r => r.url === link)) {
             results.push({ url: link, type: "media" });
           }
         }
 
-        // JSON XHR responses
+        // XHR JSON responses
         if (response.request().resourceType() === "xhr") {
           try {
             const data = await response.json();
             const jsonStr = JSON.stringify(data);
-
             const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
             if (matches) {
               matches.forEach(l => {
-                // Remove bytestart/byteend from JSON URLs too
                 l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
                 if (!results.find(r => r.url === l)) {
                   results.push({ url: l, type: "json-extracted" });
                 }
               });
             }
-          } catch { /* ignore non-JSON */ }
+          } catch {}
         }
-
       } catch (err) {
         console.error("Response parse error:", err.message);
       }
@@ -77,6 +82,20 @@ app.get("/cdn", async (req, res) => {
         resolved = true;
         const title = await page.title();
         results = results.map(r => ({ ...r, title: title || "Unknown" }));
+
+        // Sort results: priority domains first
+        const priority = [];
+        const normal = [];
+        results.forEach(r => {
+          if (PRIORITY_DOMAINS.some(d => r.url.includes(d))) {
+            priority.push(r);
+          } else {
+            normal.push(r);
+          }
+        });
+
+        results = [...priority, ...normal];
+
         await page.close();
         if (results.length > 0) {
           res.json({ results });
