@@ -22,7 +22,7 @@ async function getBrowser() {
 
 // Priority domains
 const PRIORITY_DOMAINS = [
-  "youtube.com", "youtu.be",
+  "youtube.com", "youtu.be", "googlevideo.com/videoplayback",
   "scontent", "cdninstagram",
   "fbcdn.net", "facebook.com",
   "twitter.com", "twimg.com",
@@ -41,19 +41,21 @@ app.get("/cdn", async (req, res) => {
     let results = [];
     let resolved = false;
 
-    // Collect all network responses
     page.on("response", async (response) => {
       try {
         let link = response.url();
+
+        // Remove bytestart / byteend
         link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
+        // Collect all audio/video links
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
           if (!results.find(r => r.url === link)) {
             results.push({ url: link, type: "media" });
           }
         }
 
-        // JSON XHR responses
+        // XHR JSON responses
         if (response.request().resourceType() === "xhr") {
           try {
             const data = await response.json();
@@ -83,7 +85,7 @@ app.get("/cdn", async (req, res) => {
         const title = await page.title();
         results = results.map(r => ({ ...r, title: title || "Unknown" }));
 
-        // Sort results: priority domains first
+        // Sort: priority URLs first
         const priority = [];
         const normal = [];
         results.forEach(r => {
@@ -102,7 +104,7 @@ app.get("/cdn", async (req, res) => {
     }, 30000); // 30 seconds
 
   } catch (err) {
-    // Never send timeout, just return whatever collected
+    // Never throw timeout, just return collected results
     console.error("Error:", err.message);
     res.json({ results: [] });
   }
