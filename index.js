@@ -20,7 +20,6 @@ async function getBrowser() {
   return browserPromise;
 }
 
-// Priority domains
 const PRIORITY_DOMAINS = [
   "youtube.com", "youtu.be",
   "scontent", "cdninstagram",
@@ -30,7 +29,7 @@ const PRIORITY_DOMAINS = [
   "vimeo.com"
 ];
 
-app.get("/cdn", async (req, res) => {
+app.get("/extract", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "Valid URL required" });
 
@@ -39,67 +38,68 @@ app.get("/cdn", async (req, res) => {
     const page = await browser.newPage();
 
     let results = [];
-    let resolved = false;
 
-    // Listen to network responses
-    page.on("response", async (response) => {
-      try {
-        let link = response.url();
-        link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
+    // Promise: wait until we get some result
+    const resultPromise = new Promise((resolve) => {
+      page.on("response", async (response) => {
+        try {
+          let link = response.url();
+          link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
-        if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
-          if (!results.find(r => r.url === link)) {
-            results.push({ url: link, type: "media" });
-          }
-        }
-
-        if (response.request().resourceType() === "xhr") {
-          try {
-            const data = await response.json();
-            const jsonStr = JSON.stringify(data);
-            const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
-            if (matches) {
-              matches.forEach(l => {
-                l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
-                if (!results.find(r => r.url === l)) {
-                  results.push({ url: l, type: "json-extracted" });
-                }
-              });
+          if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
+            if (!results.find(r => r.url === link)) {
+              results.push({ url: link, type: "media" });
+              resolve(); // ✅ jaise hi ek result mila, promise resolve
             }
-          } catch {}
-        }
+          }
 
-      } catch (err) {
-        console.error("Response parse error:", err.message);
+          if (response.request().resourceType() === "xhr") {
+            try {
+              const data = await response.json();
+              const jsonStr = JSON.stringify(data);
+              const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
+              if (matches) {
+                matches.forEach(l => {
+                  l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
+                  if (!results.find(r => r.url === l)) {
+                    results.push({ url: l, type: "json-extracted" });
+                  }
+                });
+                resolve(); // ✅ jaise hi ek json-extracted mila, turant resolve
+              }
+            } catch {}
+          }
+
+        } catch {}
+      });
+    });
+
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+
+    // Race between first result OR 30 sec timeout
+    await Promise.race([
+      resultPromise,
+      new Promise(r => setTimeout(r, 30000))
+    ]);
+
+    const title = await page.title();
+    results = results.map(r => ({ ...r, title: title || "Unknown" }));
+
+    // Sort: priority domains first
+    const priority = [];
+    const normal = [];
+    results.forEach(r => {
+      if (PRIORITY_DOMAINS.some(d => r.url.includes(d))) {
+        priority.push(r);
+      } else {
+        normal.push(r);
       }
     });
 
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
+    const finalResults = [...priority, ...normal];
 
-    // Wait max 30 seconds and then respond
-    setTimeout(async () => {
-      if (!resolved) {
-        resolved = true;
-        const title = await page.title();
-        results = results.map(r => ({ ...r, title: title || "Unknown" }));
-
-        // Sort: priority domains first
-        const priority = [];
-        const normal = [];
-        results.forEach(r => {
-          if (PRIORITY_DOMAINS.some(d => r.url.includes(d))) {
-            priority.push(r);
-          } else {
-            normal.push(r);
-          }
-        });
-
-        const finalResults = [...priority, ...normal];
-
-        await page.close();
-        res.json({ results: finalResults });
-      }
-    }, 30000); // 30 sec
+    await page.close();
+    res.json({ results: finalResults });
 
   } catch (err) {
     console.error("Error:", err.message);
