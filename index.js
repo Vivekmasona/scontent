@@ -41,14 +41,13 @@ app.get("/cdn", async (req, res) => {
     let results = [];
     let resolved = false;
 
+    // Collect all network responses
     page.on("response", async (response) => {
       try {
         let link = response.url();
-
-        // Remove bytestart / byteend
         link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
-        // Collect all audio/video links
+        // Media file extensions
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
           if (!results.find(r => r.url === link)) {
             results.push({ url: link, type: "media" });
@@ -78,6 +77,18 @@ app.get("/cdn", async (req, res) => {
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
+    // Extract YouTube CDN URL from page content
+    try {
+      const content = await page.content();
+      const ytMatch = content.match(/"url":"(https:\\/\\/[^"]+\.googlevideo\.com\/videoplayback[^"]+)"/);
+      if (ytMatch) {
+        let ytUrl = ytMatch[1].replace(/\\u0026/g, "&");
+        if (!results.find(r => r.url === ytUrl)) {
+          results.push({ url: ytUrl, type: "youtube" });
+        }
+      }
+    } catch {}
+
     // Wait max 30 seconds then respond
     setTimeout(async () => {
       if (!resolved) {
@@ -104,7 +115,6 @@ app.get("/cdn", async (req, res) => {
     }, 30000); // 30 seconds
 
   } catch (err) {
-    // Never throw timeout, just return collected results
     console.error("Error:", err.message);
     res.json({ results: [] });
   }
