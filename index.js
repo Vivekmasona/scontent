@@ -5,56 +5,108 @@ import puppeteer from "puppeteer-core";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/cdn", async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: "Valid URL required" });
+let browserPromise;
 
-  let browser;
-  try {
-    browser = await puppeteer.launch({
+async function getBrowser() {
+  if (!browserPromise) {
+    browserPromise = puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
+      userDataDir: "/tmp/chrome-user-data", // ETXTBSY fix
     });
+  }
+  return browserPromise;
+}
 
+// Priority domains
+const PRIORITY_DOMAINS = [
+  "youtube.com", "youtu.be",
+  "scontent", "cdninstagram",
+  "fbcdn.net", "facebook.com",
+  "twitter.com", "twimg.com",
+  "soundcloud.com",
+  "vimeo.com"
+];
+
+app.get("/cdn", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: "Valid URL required" });
+
+  try {
+    const browser = await getBrowser();
     const page = await browser.newPage();
 
-    // sabhi requests collect karne ke liye array
-    const collectedLinks = [];
+    let results = [];
+    let resolved = false;
 
-    page.on("request", (req) => {
-      const link = req.url();
-      collectedLinks.push(link);
+    // Listen to network responses
+    page.on("response", async (response) => {
+      try {
+        let link = response.url();
+        link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
+
+        if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
+          if (!results.find(r => r.url === link)) {
+            results.push({ url: link, type: "media" });
+          }
+        }
+
+        if (response.request().resourceType() === "xhr") {
+          try {
+            const data = await response.json();
+            const jsonStr = JSON.stringify(data);
+            const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
+            if (matches) {
+              matches.forEach(l => {
+                l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
+                if (!results.find(r => r.url === l)) {
+                  results.push({ url: l, type: "json-extracted" });
+                }
+              });
+            }
+          } catch {}
+        }
+
+      } catch (err) {
+        console.error("Response parse error:", err.message);
+      }
     });
 
-    // page open karo
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    });
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
-    // 30 sec tak ruk ke sab requests capture karo
-    await new Promise(r => setTimeout(r, 30000));
+    // Wait max 30 seconds and then respond
+    setTimeout(async () => {
+      if (!resolved) {
+        resolved = true;
+        const title = await page.title();
+        results = results.map(r => ({ ...r, title: title || "Unknown" }));
 
-    await browser.close();
+        // Sort: priority domains first
+        const priority = [];
+        const normal = [];
+        results.forEach(r => {
+          if (PRIORITY_DOMAINS.some(d => r.url.includes(d))) {
+            priority.push(r);
+          } else {
+            normal.push(r);
+          }
+        });
 
-    // duplicates hatao aur index number add karo
-    const uniqueLinks = [...new Set(collectedLinks)];
-    const numbered = uniqueLinks.map((l, i) => ({ no: i + 1, link: l }));
+        const finalResults = [...priority, ...normal];
 
-    res.json({
-      url,
-      total: numbered.length,
-      links: numbered
-    });
+        await page.close();
+        res.json({ results: finalResults });
+      }
+    }, 30000); // 30 sec
 
   } catch (err) {
-    if (browser) await browser.close();
-    res.status(500).json({ error: err.message });
+    console.error("Error:", err.message);
+    res.json({ results: [] });
   }
 });
 
-app.listen(PORT, () => console.log(`✅ Server running http://localhost:${PORT}`));
-
-
+app.listen(PORT, () =>
+  console.log(`✅ Server running at http://localhost:${PORT}`)
+);
