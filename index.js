@@ -20,9 +20,9 @@ async function getBrowser() {
   return browserPromise;
 }
 
-// Priority domains (YouTube CDN skipped for deploy safety)
+// Priority domains
 const PRIORITY_DOMAINS = [
-  "youtube.com", "youtu.be",
+  "youtube.com", "youtu.be", "googlevideo.com/videoplayback",
   "scontent", "cdninstagram",
   "fbcdn.net", "facebook.com",
   "twitter.com", "twimg.com",
@@ -41,16 +41,16 @@ app.get("/cdn", async (req, res) => {
     let results = [];
     let resolved = false;
 
-    // Listen to network responses
     page.on("response", async (response) => {
       try {
         let link = response.url();
+
+        // Remove bytestart / byteend
         link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
-        // Media file extensions
+        // Collect all audio/video links
         if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
-          // Skip direct YouTube CDN URLs for deploy safety
-          if (!link.includes("googlevideo.com/videoplayback") && !results.find(r => r.url === link)) {
+          if (!results.find(r => r.url === link)) {
             results.push({ url: link, type: "media" });
           }
         }
@@ -64,14 +64,13 @@ app.get("/cdn", async (req, res) => {
             if (matches) {
               matches.forEach(l => {
                 l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
-                if (!l.includes("googlevideo.com/videoplayback") && !results.find(r => r.url === l)) {
+                if (!results.find(r => r.url === l)) {
                   results.push({ url: l, type: "json-extracted" });
                 }
               });
             }
           } catch {}
         }
-
       } catch (err) {
         console.error("Response parse error:", err.message);
       }
@@ -79,14 +78,14 @@ app.get("/cdn", async (req, res) => {
 
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
 
-    // Wait max 30 seconds and then respond
+    // Wait max 30 seconds then respond
     setTimeout(async () => {
       if (!resolved) {
         resolved = true;
         const title = await page.title();
         results = results.map(r => ({ ...r, title: title || "Unknown" }));
 
-        // Sort: priority domains first
+        // Sort: priority URLs first
         const priority = [];
         const normal = [];
         results.forEach(r => {
@@ -102,9 +101,10 @@ app.get("/cdn", async (req, res) => {
         await page.close();
         res.json({ results: finalResults });
       }
-    }, 30000); // 30 sec
+    }, 30000); // 30 seconds
 
   } catch (err) {
+    // Never throw timeout, just return collected results
     console.error("Error:", err.message);
     res.json({ results: [] });
   }
@@ -113,3 +113,4 @@ app.get("/cdn", async (req, res) => {
 app.listen(PORT, () =>
   console.log(`✅ Server running at http://localhost:${PORT}`)
 );
+
