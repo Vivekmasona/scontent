@@ -39,44 +39,51 @@ app.get("/cdn", async (req, res) => {
 
     let results = [];
 
-    // Promise: wait until we get some result
     const resultPromise = new Promise((resolve) => {
       page.on("response", async (response) => {
         try {
           let link = response.url();
           link = link.replace(/&bytestart=\d+&byteend=\d+/gi, "");
 
+          // --- direct media URLs
           if (link.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav)(\?|$)/i)) {
             if (!results.find(r => r.url === link)) {
               results.push({ url: link, type: "media" });
-              resolve(); // ✅ jaise hi ek result mila, promise resolve
+              resolve();
             }
           }
 
+          // --- XHR JSON parsing safely
           if (response.request().resourceType() === "xhr") {
-            try {
-              const data = await response.json();
-              const jsonStr = JSON.stringify(data);
-              const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
-              if (matches) {
-                matches.forEach(l => {
-                  l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
-                  if (!results.find(r => r.url === l)) {
-                    results.push({ url: l, type: "json-extracted" });
-                  }
-                });
-                resolve(); // ✅ jaise hi ek json-extracted mila, turant resolve
+            const ct = response.headers()["content-type"] || "";
+            if (ct.includes("application/json")) {
+              try {
+                const data = await response.json();
+                const jsonStr = JSON.stringify(data);
+                const matches = jsonStr.match(/https?:\/\/[^\s"']+\.(mp4|m3u8|mp3|aac|ogg|opus|wav)/gi);
+                if (matches) {
+                  matches.forEach(l => {
+                    l = l.replace(/&bytestart=\d+&byteend=\d+/gi, "");
+                    if (!results.find(r => r.url === l)) {
+                      results.push({ url: l, type: "json-extracted" });
+                    }
+                  });
+                  resolve();
+                }
+              } catch (err) {
+                // ignore non-json responses
               }
-            } catch {}
+            }
           }
 
-        } catch {}
+        } catch (err) {
+          console.error("Response handler error:", err.message);
+        }
       });
     });
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-    // Race between first result OR 30 sec timeout
     await Promise.race([
       resultPromise,
       new Promise(r => setTimeout(r, 30000))
@@ -85,7 +92,7 @@ app.get("/cdn", async (req, res) => {
     const title = await page.title();
     results = results.map(r => ({ ...r, title: title || "Unknown" }));
 
-    // Sort: priority domains first
+    // Priority sorting
     const priority = [];
     const normal = [];
     results.forEach(r => {
