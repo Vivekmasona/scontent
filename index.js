@@ -1,11 +1,14 @@
 import express from "express";
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
+import { v4 as uuidv4 } from "uuid";
+import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-let browserPromise;
+app.use(express.json());
 
+let browserPromise;
 async function getBrowser() {
   if (!browserPromise) {
     browserPromise = puppeteer.launch({
@@ -19,310 +22,247 @@ async function getBrowser() {
   return browserPromise;
 }
 
-const PRIORITY_DOMAINS = [
-  "youtube.com", "youtu.be",
-  "scontent", "cdninstagram",
-  "fbcdn.net", "facebook.com",
-  "twitter.com", "twimg.com",
-  "soundcloud.com",
-  "vimeo.com",
-  "googlevideo.com",
-  "play.google.com",
-];
-
+const SESSIONS = {};
 const MEDIA_EXT_RE = /\.(mp4|webm|m3u8|mkv|mp3|aac|ogg|opus|wav|flac|m4a|jpg|jpeg|png|gif|bmp|webp)(\?|$)/i;
-const SMALL_DATAURL_LIMIT_BYTES = 200 * 1024; // avoid huge data-urls
+const PRIORITY_DOMAINS = ["youtube.com","googlevideo","youtu.be","cdninstagram","fbcdn.net","facebook.com","twitter.com","twimg.com","soundcloud.com","vimeo.com","play.google.com"];
 
-app.get("/cdn", async (req, res) => {
+// Start session endpoint
+app.get("/start-session", async (req, res) => {
   const { url } = req.query;
-  if (!url) return res.status(400).json({ error: "Valid URL required" });
+  if(!url) return res.status(400).send("Provide ?url=...");
 
-  try {
-    const browser = await getBrowser();
-    const page = await browser.newPage();
+  const sessionId = uuidv4();
+  SESSIONS[sessionId] = { clients: new Set(), results: [], timer: null, page: null };
+  const host = req.protocol + "://" + req.get("host");
+  const viewerUrl = `/viewer?session=${sessionId}&target=${encodeURIComponent(url)}`;
 
-    // Inject script before any page scripts run to capture dynamic behavior.
-    await page.evaluateOnNewDocument(() => {
-      (function () {
-        const send = (obj) => {
+  // Background Puppeteer
+  (async () => {
+    try {
+      const browser = await getBrowser();
+      const page = await browser.newPage();
+      SESSIONS[sessionId].page = page;
+
+      await page.evaluateOnNewDocument(() => {
+        (function(){
+          const send = (o) => console.log("CAPTURE::"+JSON.stringify(o));
+          const patchFetch = () => {
+            try {
+              const of = window.fetch.bind(window);
+              window.fetch = (...a)=>{
+                const p = of(...a);
+                p.then(r=>{
+                  try{
+                    const ct = r.headers.get&&r.headers.get("content-type")||"";
+                    if(ct.includes("video")||ct.includes("audio")||ct.includes("image")||/m3u8|mpegurl/i.test(ct)||(r.url&&r.url.match(/\.(mp4|webm|m3u8|mp3|jpg|png)/i))){
+                      send({url:r.url,ct,note:"fetch"});
+                    }
+                  }catch(e){}
+                }).catch(()=>{});
+                return p;
+              };
+            }catch(e){}
+          };
+          patchFetch();
+
           try {
-            // prefix so Node can filter
-            console.log("CAPTURE_MEDIA::" + JSON.stringify(obj));
-          } catch (e) { /* ignore */ }
-        };
-
-        // Patch URL.createObjectURL - try to read blob as dataURL (async)
-        try {
-          const origCreate = URL.createObjectURL.bind(URL);
-          URL.createObjectURL = function (obj) {
-            try {
-              if (obj && obj instanceof Blob) {
-                // convert small blobs to dataURL and send (async)
-                const r = new FileReader();
-                r.onload = function () {
-                  try { send({ type: "dataurl", data: r.result, note: "from-createObjectURL" }); } catch (e) { }
-                };
-                // don't read huge blobs
-                if (obj.size && obj.size < 300 * 1024) r.readAsDataURL(obj);
-              }
-            } catch (e) { }
-            return origCreate(obj);
-          };
-        } catch (e) { }
-
-        // Patch fetch to sniff response urls + content-types
-        try {
-          const origFetch = window.fetch.bind(window);
-          window.fetch = function (...args) {
-            const p = origFetch(...args);
-            p.then(async (resp) => {
-              try {
-                const ct = resp.headers.get && resp.headers.get("content-type") || "";
-                const u = resp.url || (args[0] || "");
-                if (ct.includes("video") || ct.includes("audio") || ct.includes("image") || /m3u8|mpegurl|application\/vnd\.apple\.mpegurl/i.test(ct) || (u && u.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|wav|jpg|png|gif)/i))) {
-                  send({ type: "url", url: u, contentType: ct, note: "fetch" });
-                }
-                // Try to convert small responses to blob/dataURL (non-blocking)
-                try {
-                  const clone = resp.clone();
-                  if ((ct && (ct.includes("video")||ct.includes("audio")||ct.includes("image"))) && typeof clone.blob === "function") {
-                    const b = await clone.blob();
-                    if (b && b.size && b.size < 200 * 1024) { // small safety limit
-                      const r = new FileReader();
-                      r.onload = () => send({ type: "dataurl", data: r.result, url: u, contentType: ct, note: "fetch-blob-small" });
-                      r.readAsDataURL(b);
-                    }
+            const oopen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function(m,u){ this._cap_u=u; return oopen.apply(this,arguments); };
+            const osend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.send = function(){
+              this.addEventListener && this.addEventListener("load",function(){
+                try{
+                  const ct = this.getResponseHeader && this.getResponseHeader("content-type") || "";
+                  const u = this._cap_u || "";
+                  if(ct.includes("video")||ct.includes("audio")||ct.includes("image")||u.match(/\.(mp4|webm|mp3|jpg|png)/i)){
+                    send({url:u,ct,note:"xhr"});
                   }
-                } catch(e){}
-              } catch (e) { }
-            }).catch(()=>{});
-            return p;
-          };
-        } catch (e) { }
-
-        // Patch XMLHttpRequest to capture XHRs
-        try {
-          const origOpen = window.XMLHttpRequest.prototype.open;
-          window.XMLHttpRequest.prototype.open = function (method, url) {
-            this._captureUrl = url;
-            try { return origOpen.apply(this, arguments); } catch(e) {}
-          };
-          const origSend = window.XMLHttpRequest.prototype.send;
-          window.XMLHttpRequest.prototype.send = function () {
-            this.addEventListener && this.addEventListener("load", function () {
-              try {
-                const ct = this.getResponseHeader && this.getResponseHeader("content-type") || "";
-                const u = this._captureUrl || "";
-                if (ct.includes("video") || ct.includes("audio") || ct.includes("image") || u.match(/\.(mp4|webm|m3u8|mp3|aac|ogg|wav|jpg|png|gif)/i)) {
-                  send({ type: "url", url: u, contentType: ct, note: "xhr" });
-                }
-                // If response is JSON that might contain media links, try to send a trimmed JSON string
-                try {
-                  if (ct.includes("application/json") && this.responseText) {
-                    const trimmed = this.responseText.slice(0, 10000);
-                    send({ type: "maybe-json", url: u, preview: trimmed, note: "xhr-json-preview" });
-                  }
-                } catch(e){}
-              } catch (e) { }
-            });
-            try { return origSend.apply(this, arguments); } catch(e) {}
-          };
-        } catch (e) { }
-
-        // Patch MediaSource / SourceBuffer to observe appended segments (truncate!)
-        try {
-          if (window.MediaSource && window.SourceBuffer) {
-            const origAddSource = window.MediaSource.prototype.addSourceBuffer;
-            window.MediaSource.prototype.addSourceBuffer = function (mimeType) {
-              const sb = origAddSource.apply(this, arguments);
-              try {
-                const origAppend = sb.appendBuffer;
-                sb.appendBuffer = function (buffer) {
-                  try {
-                    // slice a small part for debugging
-                    const slice = buffer && buffer.byteLength ? buffer.slice(0, 64 * 1024) : buffer;
-                    const blob = new Blob([slice]);
-                    if (blob.size < 200 * 1024) {
-                      const r = new FileReader();
-                      r.onload = () => {
-                        send({ type: "mse-segment", mimeType, snippet: r.result.slice(0, 5000), note: "mse-append-snippet" });
-                      };
-                      r.readAsDataURL(blob);
-                    } else {
-                      send({ type: "mse-segment", mimeType, size: blob.size, note: "mse-append-large" });
-                    }
-                  } catch (e) { }
-                  return origAppend.apply(this, arguments);
-                };
-              } catch (e) { }
-              return sb;
+                }catch(e){}
+              });
+              return osend.apply(this,arguments);
             };
-          }
-        } catch (e) { }
+          }catch(e){}
 
-        // Observe DOM <video>, <audio>, <img> element src or source children
-        try {
-          const collect = () => {
-            const out = [];
-            document.querySelectorAll("video, audio").forEach(el => {
-              const list = new Set();
-              if (el.currentSrc) list.add(el.currentSrc);
-              if (el.src) list.add(el.src);
-              el.querySelectorAll && el.querySelectorAll("source").forEach(s => s.src && list.add(s.src));
-              list.forEach(u => out.push({ type: el.tagName.toLowerCase(), url: u, note: "dom-element" }));
+          const collectDom = ()=>{
+            const out=[];
+            document.querySelectorAll("video,audio,img,source").forEach(el=>{
+              const srcs=[];
+              if(el.src) srcs.push(el.src);
+              if(el.currentSrc) srcs.push(el.currentSrc);
+              if(el.getAttribute){ const s=el.getAttribute("src"); if(s) srcs.push(s);}
+              if(el.querySelectorAll) el.querySelectorAll("source").forEach(s=>s.src&&srcs.push(s.src));
+              srcs.forEach(u=>out.push(u));
             });
-            document.querySelectorAll("img").forEach(img => {
-              if (img.src) out.push({ type: "image", url: img.src, note: "dom-img" });
-            });
-            if (out.length) send({ type: "dom-collection", items: out });
+            if(out.length) send({type:"dom",items:Array.from(new Set(out))});
           };
-          // initial collect + mutation observer for later added elements
-          collect();
-          const mo = new MutationObserver((m) => collect());
-          mo.observe(document, { childList: true, subtree: true });
-        } catch (e) { }
-
-      })();
-    });
-
-    const results = [];
-    const seen = new Set();
-
-    // helper to push results safely
-    function pushResult(obj) {
-      if (!obj || !obj.url) return;
-      const key = obj.url + "|" + (obj.type || "");
-      if (seen.has(key)) return;
-      seen.add(key);
-      // normalize type
-      let t = obj.type || "media";
-      if (t === "image" || (obj.contentType && obj.contentType.startsWith("image"))) t = "image";
-      else if (t === "audio" || (obj.contentType && obj.contentType.startsWith("audio"))) t = "audio";
-      else if (t === "video" || (obj.contentType && obj.contentType.startsWith("video"))) t = "video";
-      else {
-        // guess from extension
-        if (obj.url.match(/\.(mp4|webm|m3u8|mkv)/i)) t = "video";
-        else if (obj.url.match(/\.(mp3|aac|ogg|opus|wav|m4a|flac)/i)) t = "audio";
-        else if (obj.url.match(/\.(jpg|jpeg|png|gif|webp|bmp)/i)) t = "image";
-      }
-      results.push({
-        url: obj.url,
-        type: t,
-        source: obj.source || obj.note || "detected",
-        contentType: obj.contentType || null,
-        title: null,
+          collectDom();
+          new MutationObserver(collectDom).observe(document,{childList:true,subtree:true});
+        })();
       });
-    }
 
-    // Capture console messages from the page (the injected script uses a JSON prefix)
-    page.on("console", async (message) => {
-      try {
-        const txt = message.text();
-        if (!txt || !txt.startsWith("CAPTURE_MEDIA::")) return;
-        const payload = JSON.parse(txt.replace(/^CAPTURE_MEDIA::/, ""));
-        // payload types: url, dataurl, dom-collection, mse-segment, maybe-json
-        if (payload.type === "url") {
-          pushResult({ url: payload.url, type: payload.contentType && payload.contentType.startsWith("image") ? "image" : undefined, source: payload.note || "page" });
-        } else if (payload.type === "dataurl") {
-          // convert data URL to a pseudo-url (data:) so client can download
-          pushResult({ url: payload.data, type: "media", source: payload.note || "dataurl" });
-        } else if (payload.type === "dom-collection" && Array.isArray(payload.items)) {
-          payload.items.forEach(it => pushResult({ url: it.url, type: it.type, source: it.note || "dom" }));
-        } else if (payload.type === "maybe-json" && payload.preview) {
-          // try to extract media urls from preview snippet
-          const matches = (payload.preview || "").match(/https?:\/\/[^\s"']+\.(mp4|webm|m3u8|mp3|aac|ogg|opus|wav|jpg|jpeg|png|gif|webp)/gi);
-          if (matches) matches.forEach(u => pushResult({ url: u, source: "json-preview" }));
-        } else if (payload.type === "mse-segment") {
-          // snippet only - not a full URL; store as debug item
-          pushResult({ url: "data:application/octet-stream;base64," + (payload.snippet ? Buffer.from(payload.snippet.slice(0,100)).toString("base64") : ""), type: "video", source: "mse-snippet" });
-        }
-      } catch (e) { /* ignore parse errors */ }
-    });
+      page.on("console", msg => {
+        try{
+          const txt = msg.text();
+          if(!txt.startsWith("CAPTURE::")) return;
+          const payload = JSON.parse(txt.replace(/^CAPTURE::/,""));
+          handleCaptured(sessionId,payload);
+        }catch(e){}
+      });
 
-    // Also inspect responses for content-type or direct media URL patterns
-    page.on("response", async (response) => {
-      try {
-        const rurl = response.url().replace(/&bytestart=\d+&byteend=\d+/gi, "");
-        const headers = response.headers();
-        const ct = headers["content-type"] || headers["Content-Type"] || "";
-        if (ct && (ct.includes("video") || ct.includes("audio") || ct.includes("image") || /m3u8|mpegurl|application\/vnd\.apple\.mpegurl/i.test(ct))) {
-          pushResult({ url: rurl, contentType: ct, source: "network-response" });
-        } else if (MEDIA_EXT_RE.test(rurl)) {
-          pushResult({ url: rurl, source: "network-response-ext" });
-        } else {
-          // if xhr/json responses may contain links -> try to parse small JSON bodies
-          const req = response.request();
-          if (req && req.resourceType && req.resourceType() === "xhr" && ct.includes("application/json")) {
-            try {
-              const json = await response.text();
-              const matches = (json || "").match(/https?:\/\/[^\s"']+\.(mp4|webm|m3u8|mp3|aac|ogg|wav|jpg|jpeg|png|gif|webp)/gi);
-              if (matches) matches.forEach(u => pushResult({ url: u, source: "xhr-json" }));
-            } catch (e) { }
+      page.on("response", async response => {
+        try{
+          const rurl = response.url().replace(/&bytestart=\d+&byteend=\d+/gi,"");
+          const ct = response.headers()["content-type"] || "";
+          if(ct.includes("video")||ct.includes("audio")||ct.includes("image")||/m3u8|mpegurl/i.test(ct)){
+            handleCaptured(sessionId,{url:rurl,ct,note:"network-response"});
+          } else if(MEDIA_EXT_RE.test(rurl)){
+            handleCaptured(sessionId,{url:rurl,note:"network-ext"});
           }
-        }
-      } catch (e) { /* ignore */ }
-    });
-
-    // requestfinished sometimes helps find final redirected urls (like googlevideo)
-    page.on("requestfinished", (req) => {
-      try {
-        const r = req.response();
-        if (!r) return;
-        const rurl = req.url().replace(/&bytestart=\d+&byteend=\d+/gi, "");
-        const headers = r.headers();
-        const ct = headers["content-type"] || headers["Content-Type"] || "";
-        if (ct && (ct.includes("video") || ct.includes("audio") || ct.includes("image"))) {
-          pushResult({ url: rurl, contentType: ct, source: "requestfinished" });
-        } else if (MEDIA_EXT_RE.test(rurl)) {
-          pushResult({ url: rurl, source: "requestfinished-ext" });
-        }
-      } catch (e) { }
-    });
-
-    // Navigate the page
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 }).catch(()=>{});
-
-    // Grab DOM media sources explicitly after load
-    const domMedia = await page.evaluate(() => {
-      const out = [];
-      document.querySelectorAll("video, audio").forEach(el => {
-        const set = new Set();
-        if (el.src) set.add(el.src);
-        if (el.currentSrc) set.add(el.currentSrc);
-        el.querySelectorAll && el.querySelectorAll("source").forEach(s => s.src && set.add(s.src));
-        set.forEach(u => out.push({ url: u, tag: el.tagName.toLowerCase() }));
+        }catch(e){}
       });
-      document.querySelectorAll("img").forEach(img => img.src && out.push({ url: img.src, tag: "img" }));
-      // also pick up source tags outside media elements
-      document.querySelectorAll("source").forEach(s => s.src && out.push({ url: s.src, tag: "source" }));
-      return out;
-    });
 
-    domMedia.forEach(d => pushResult({ url: d.url, type: d.tag === "img" ? "image" : undefined, source: "dom-scan" }));
+      await page.goto(url,{waitUntil:"networkidle2",timeout:60000}).catch(()=>{});
+    } catch(e){ console.error(e); }
+  })();
 
-    // Wait a little bit to give the page's dynamic scripts time to trigger our hooks (XHR/fetch/MSE)
-    await new Promise(r => setTimeout(r, 1800));
-
-    // Add page title to results
-    const title = await page.title().catch(() => "Unknown");
-    results.forEach(r => r.title = title || "Unknown");
-
-    // priority sort
+  const getSortedResults = ()=>{
+    if(!SESSIONS[sessionId]) return [];
+    const all = [...SESSIONS[sessionId].results];
     const priority = [];
     const normal = [];
-    results.forEach(r => {
-      if (PRIORITY_DOMAINS.some(d => (r.url || "").includes(d))) priority.push(r);
-      else normal.push(r);
+    all.forEach(r=>{
+      const proxiedUrl = host+"/proxy?url="+encodeURIComponent(r.url);
+      if((r.type==="video"||r.type==="audio") && PRIORITY_DOMAINS.some(d=>r.url.includes(d))){
+        priority.push({...r,url:proxiedUrl});
+      } else normal.push({...r,url:proxiedUrl});
     });
+    return [...priority,...normal];
+  };
 
-    await page.close();
-    res.json({ results: [...priority, ...normal] });
-
-  } catch (err) {
-    console.error("Error in /cdn:", err && err.stack || err);
-    res.json({ results: [] });
-  }
+  res.json({ session: sessionId, host, viewer: host + viewerUrl, results: getSortedResults() });
 });
 
-app.listen(PORT, () => console.log(`✅ Server running at http://localhost:${PORT}`));
-        
+// Proxy endpoint
+app.get("/proxy", async (req,res)=>{
+  const { url }=req.query;
+  if(!url) return res.status(400).send("Provide ?url=...");
+  try{
+    const r = await fetch(url);
+    const ct = r.headers.get("content-type") || "application/octet-stream";
+    res.setHeader("Content-Type",ct);
+    const buffer = await r.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  }catch(e){ res.status(500).send("Failed"); }
+});
+
+// Viewer page
+app.get("/viewer", (req,res)=>{
+  const { session, target } = req.query;
+  if(!session || !SESSIONS[session] || !target) return res.status(400).send("Missing session or target");
+  const host = req.protocol + "://" + req.get("host");
+
+  const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Live Extractor</title>
+<style>
+body{margin:0;font-family:Arial,sans-serif;background:#111;color:#fff;height:100vh;display:flex;flex-direction:column}
+#iframe-container{height:60%} iframe{width:100%;height:100%;border:0}
+#footer{height:40%;background:#222;display:flex;flex-direction:column}
+#tab-scroll{flex:1;overflow-x:auto;display:flex;gap:8px;padding:6px;align-items:center}
+.media-item{min-width:220px;background:#333;border-radius:6px;padding:6px;display:flex;flex-direction:column;gap:4px;color:#fff}
+.media-item img, .media-item video, .media-item audio{max-width:200px;max-height:120px;border-radius:4px}
+.buttons{display:flex;gap:4px;flex-wrap:wrap}
+.buttons button,.buttons a{padding:4px 6px;border:none;border-radius:4px;cursor:pointer;background:#555;color:#fff}
+</style>
+</head>
+<body>
+<div id="iframe-container"><iframe src="${target}" id="frame"></iframe></div>
+<div id="footer">
+  <div id="tab-scroll"></div>
+</div>
+<script>
+const session="${session}";
+const tabScroll=document.getElementById("tab-scroll");
+const clients={};
+
+const evt=new EventSource("/stream?session="+encodeURIComponent(session));
+evt.onmessage=e=>{
+  try{
+    const payload=JSON.parse(e.data);
+    if(payload.type==="found" && payload.item) addItem(payload.item);
+  }catch(e){}
+};
+function addItem(it){
+  const url=it.url;
+  if(!url||clients[url]) return;
+  const div=document.createElement("div"); div.className="media-item";
+  let mediaHtml="";
+  if(it.type==="image") mediaHtml=\`<img src="\${url}">\`;
+  else if(it.type==="video") mediaHtml=\`<video src="\${url}" controls></video>\`;
+  else if(it.type==="audio") mediaHtml=\`<audio src="\${url}" controls></audio>\`;
+  else mediaHtml=\`<a href="\${url}" target="_blank">Link</a>\`;
+  div.innerHTML=mediaHtml;
+  const btns=document.createElement("div"); btns.className="buttons";
+  const dl=document.createElement("a"); dl.href=url; dl.download=""; dl.textContent="Download";
+  const cp=document.createElement("button"); cp.textContent="Copy"; cp.onclick=()=>{navigator.clipboard.writeText(url); cp.textContent="Copied"; setTimeout(()=>cp.textContent="Copy",1200);};
+  btns.appendChild(dl); btns.appendChild(cp);
+  div.appendChild(btns);
+  tabScroll.appendChild(div);
+  clients[url]=true;
+}
+</script>
+</body>
+</html>`;
+
+  res.send(html);
+});
+
+// SSE stream endpoint
+app.get("/stream", (req,res)=>{
+  const { session }=req.query;
+  if(!session || !SESSIONS[session]) return res.status(404).send("Invalid session");
+  res.setHeader("Content-Type","text/event-stream");
+  res.setHeader("Cache-Control","no-cache");
+  res.setHeader("Connection","keep-alive");
+  res.flushHeaders?.();
+
+  // send existing history
+  SESSIONS[session].results.forEach(r=>{
+    try{ res.write(`data: ${JSON.stringify({type:"found",item:r})}\n\n`); }catch(e){}
+  });
+
+  SESSIONS[session].clients.add(res);
+  const keep=setInterval(()=>res.write(": ping\n\n"),25000);
+  req.on("close",()=>{ clearInterval(keep); if(SESSIONS[session]) SESSIONS[session].clients.delete(res); });
+});
+
+// helpers
+function handleCaptured(sessionId,item){
+  if(!SESSIONS[sessionId]) return;
+  if(item.type==="dom" && Array.isArray(item.items)){
+    item.items.forEach(u=>push(sessionId,{url:u,source:"dom"}));
+    return;
+  }
+  if(item.url) push(sessionId,{url:item.url,contentType:item.ct||item.contentType,source:item.note||item.source});
+}
+function push(sessionId,item){
+  if(!SESSIONS[sessionId]) return;
+  const url=item.url;
+  if(!url) return;
+  if(SESSIONS[sessionId].results.find(r=>r.url===url)) return;
+  let type = item.type || null;
+  if(!type){
+    if((item.contentType||"").startsWith("image")) type="image";
+    else if((item.contentType||"").startsWith("video")) type="video";
+    else if((item.contentType||"").startsWith("audio")) type="audio";
+    else if(url.match(/\.(mp4|webm|m3u8)/i)) type="video";
+    else if(url.match(/\.(mp3|aac|wav|m4a|flac|ogg|opus)/i)) type="audio";
+    else if(url.match(/\.(jpg|jpeg|png|gif|webp|bmp)/i)) type="image";
+    else type="media";
+  }
+  SESSIONS[sessionId].results.push({url,type,source:item.source||item.note||null,contentType:item.contentType||item.ct||null,title:null});
+}
+
+app.listen(PORT,()=>console.log("Server running on",PORT));
