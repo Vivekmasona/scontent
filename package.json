@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "yt-dlp-exec": "^3.0.0"
+    "yt-dlp-exec": "latest"
   }
 }
