@@ -1,14 +1,14 @@
 {
-  "name": "api-extractor",
+  "name": "backend-extractor",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "build": "npx playwright install chromium",
     "start": "node index.js"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^123.0.0",
     "express": "^4.19.2",
-    "playwright": "^1.42.1"
+    "puppeteer-core": "^22.6.0"
   }
 }
