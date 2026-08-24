@@ -1,32 +1,8 @@
 import express from "express";
-import chromium from "@sparticuz/chromium";
-import puppeteer from "puppeteer-core";
+import ytDlp from "yt-dlp-exec";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-app.use(express.json());
-
-let browserPromise;
-async function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = puppeteer.launch({
-      args: [
-        ...chromium.args,
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--single-process",
-        "--no-zygote",
-      ],
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
-  }
-  return browserPromise;
-}
 
 app.get("/extract", async (req, res) => {
   let { url } = req.query;
@@ -39,133 +15,87 @@ app.get("/extract", async (req, res) => {
     url = "https://" + url;
   }
 
-  let page;
   try {
-    const browser = await getBrowser();
-    page = await browser.newPage();
-
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    );
-
-    const extracted = {
-      videos: new Set(),
-      audio: new Set(),
-      images: new Set(),
-      documents: new Set(),
-      backend_apis: new Set(),
-      other_links: new Set()
-    };
-
-    // Helper function to classify URLs
-    const classifyUrl = (reqUrl, contentType = "") => {
-      if (!reqUrl || reqUrl.startsWith("data:")) return;
-
-      const lowerUrl = reqUrl.toLowerCase();
-      const lowerCT = contentType.toLowerCase();
-
-      // Video Filtering
-      if (
-        lowerCT.includes("video") ||
-        /\.(mp4|m3u8|webm|mkv|flv|avi|mov)(\?|$)/i.test(lowerUrl)
-      ) {
-        extracted.videos.add(reqUrl);
-      }
-      // Audio Filtering
-      else if (
-        lowerCT.includes("audio") ||
-        /\.(mp3|aac|wav|ogg|m4a|flac|opus)(\?|$)/i.test(lowerUrl)
-      ) {
-        extracted.audio.add(reqUrl);
-      }
-      // Image Filtering
-      else if (
-        lowerCT.includes("image") ||
-        /\.(jpg|jpeg|png|gif|webp|svg|ico|bmp)(\?|$)/i.test(lowerUrl)
-      ) {
-        extracted.images.add(reqUrl);
-      }
-      // Document Filtering
-      else if (
-        lowerCT.includes("pdf") ||
-        /\.(pdf|doc|docx|zip|rar|csv)(\?|$)/i.test(lowerUrl)
-      ) {
-        extracted.documents.add(reqUrl);
-      }
-      // Backend / API Endpoints Filtering
-      else if (
-        lowerCT.includes("json") ||
-        lowerCT.includes("xml") ||
-        lowerUrl.includes("/api/") ||
-        lowerUrl.includes("/v1/") ||
-        lowerUrl.includes("/v2/") ||
-        lowerUrl.includes("graphql")
-      ) {
-        extracted.backend_apis.add(reqUrl);
-      }
-      // Catch remaining fetch/xhr calls as general backend links
-      else {
-        extracted.other_links.add(reqUrl);
-      }
-    };
-
-    // 1. Intercept Network Requests & Responses
-    page.on("response", (response) => {
-      try {
-        const reqUrl = response.url();
-        const contentType = response.headers()["content-type"] || "";
-        classifyUrl(reqUrl, contentType);
-      } catch (e) {}
+    // Universal Extraction using yt-dlp
+    const output = await ytDlp(url, {
+      dumpSingleJson: true,
+      noWarnings: true,
+      noCallHome: true,
+      noCheckCertificate: true,
+      preferFreeFormats: true,
+      youtubeSkipDashManifest: true,
+      referer: url
     });
 
-    // Navigate to website and wait for dynamic JavaScript load
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 2500));
+    const videos = [];
+    const audios = [];
 
-    // 2. DOM Elements Extraction (<video>, <audio>, <img>, <a>)
-    const domResources = await page.evaluate(() => {
-      const links = [];
-      document.querySelectorAll("video, audio, source, img, a").forEach((el) => {
-        const src = el.src || el.href || el.currentSrc;
-        if (src) links.push(src);
+    // Filter Video & Audio formats
+    if (output.formats && Array.isArray(output.formats)) {
+      output.formats.forEach((fmt) => {
+        // Direct download URL check
+        if (!fmt.url) return;
+
+        // Video + Audio / Video-Only formats
+        if (fmt.vcodec && fmt.vcodec !== "none") {
+          videos.push({
+            format_id: fmt.format_id,
+            quality: fmt.format_note || `${fmt.height || "unknown"}p`,
+            ext: fmt.ext,
+            resolution: fmt.resolution || (fmt.width ? `${fmt.width}x${fmt.height}` : "N/A"),
+            fps: fmt.fps || null,
+            file_size_mb: fmt.filesize ? (fmt.filesize / (1024 * 1024)).toFixed(2) : "Unknown",
+            download_url: fmt.url
+          });
+        }
+        // Audio-Only formats
+        else if (fmt.acodec && fmt.acodec !== "none") {
+          audios.push({
+            format_id: fmt.format_id,
+            ext: fmt.ext,
+            audio_bitrate: fmt.abr ? `${fmt.abr}kbps` : "N/A",
+            file_size_mb: fmt.filesize ? (fmt.filesize / (1024 * 1024)).toFixed(2) : "Unknown",
+            download_url: fmt.url
+          });
+        }
       });
-      return links;
-    });
+    }
 
-    domResources.forEach((link) => classifyUrl(link));
+    // Direct Best Video Fallback (If formats array is empty)
+    if (videos.length === 0 && output.url) {
+      videos.push({
+        format_id: "best",
+        quality: "HD / Original",
+        ext: output.ext || "mp4",
+        download_url: output.url
+      });
+    }
 
-    await page.close();
-
-    // Send Categorized JSON Response
     return res.json({
       status: "success",
-      target_site: url,
+      title: output.title || output.fulltitle || "Media File",
+      duration_seconds: output.duration || null,
+      thumbnail: output.thumbnail || (output.thumbnails && output.thumbnails[0]?.url) || null,
+      uploader: output.uploader || output.uploader_id || "Unknown",
+      source_site: output.extractor_key || "Universal Engine",
       summary: {
-        total_videos: extracted.videos.size,
-        total_audio: extracted.audio.size,
-        total_images: extracted.images.size,
-        total_documents: extracted.documents.size,
-        total_backend_apis: extracted.backend_apis.size
+        total_video_formats: videos.length,
+        total_audio_formats: audios.length
       },
       data: {
-        videos: Array.from(extracted.videos),
-        audio: Array.from(extracted.audio),
-        images: Array.from(extracted.images),
-        documents: Array.from(extracted.documents),
-        backend_apis: Array.from(extracted.backend_apis),
-        other_network_calls: Array.from(extracted.other_links)
+        videos: videos.reverse(), // Highest resolution first
+        audios: audios.reverse()  // Highest audio quality first
       }
     });
 
   } catch (err) {
-    if (page) await page.close();
     return res.status(500).json({
       status: "error",
-      message: "Extraction failed",
+      message: "Extraction failed. Invalid link or private video.",
       details: err.message
     });
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Universal Extractor Running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Universal Media Extractor Running on Port ${PORT}`));
 
