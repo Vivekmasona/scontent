@@ -1,5 +1,5 @@
 import express from "express";
-import { chromium } from "playwright-core";
+import { chromium } from "playwright";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -7,12 +7,11 @@ const PORT = process.env.PORT || 3000;
 app.get("/extract", async (req, res) => {
   let { url } = req.query;
 
-  if (!url) return res.status(400).json({ error: "URL required" });
+  if (!url) return res.status(400).json({ error: "URL query parameter required" });
   if (!url.startsWith("http")) url = "https://" + url;
 
   let browser;
   try {
-    // Memory limit control ke sath lightweight browser launch
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -20,7 +19,7 @@ app.get("/extract", async (req, res) => {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--js-flags=--max-old-space-size=256" // Memory cap to prevent crash
+        "--js-flags=--max-old-space-size=256"
       ]
     });
 
@@ -31,12 +30,10 @@ app.get("/extract", async (req, res) => {
     const page = await context.newPage();
     const backendApis = new Set();
 
-    // Catch all outgoing network requests made by JavaScript
     page.on("request", (request) => {
       const type = request.resourceType();
       const reqUrl = request.url();
 
-      // Only extract actual API/Data calls
       if (["fetch", "xhr"].includes(type)) {
         if (!reqUrl.includes("google-analytics") && !reqUrl.includes("facebook")) {
           backendApis.add(reqUrl);
@@ -44,9 +41,8 @@ app.get("/extract", async (req, res) => {
       }
     });
 
-    // Page load & wait for JS execution
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-    await page.waitForTimeout(3000); // Give time for dynamic APIs to trigger
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
+    await page.waitForTimeout(3000);
 
     await browser.close();
 
