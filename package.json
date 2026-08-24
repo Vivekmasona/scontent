@@ -4,10 +4,11 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
+    "build": "npx playwright install chromium",
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "playwright-core": "^1.42.1"
+    "playwright": "^1.42.1"
   }
 }
