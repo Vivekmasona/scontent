@@ -1,8 +1,25 @@
 import express from "express";
 import ytDlp from "yt-dlp-exec";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// YAHAN APNI cookies.txt FILE KA POORA CONTENT PASTE KAREIN
+const COOKIES_DATA = `# Netscape HTTP Cookie File
+# http://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+.youtube.com	TRUE	/	FALSE	1780000000	VISITOR_INFO1_LIVE	xxxxxxxx
+.youtube.com	TRUE	/	TRUE	1780000000	LOGIN_INFO	xxxxxxxx
+.youtube.com	TRUE	/	TRUE	1780000000	__Secure-3PAPISID	xxxxxxxx
+.youtube.com	TRUE	/	TRUE	1780000000	__Secure-3PSID	xxxxxxxx
+# Pasted remaining cookies here...`;
+
+// Render server par cookies.txt file generate karein
+const cookiesPath = path.join("/tmp", "cookies.txt");
+fs.writeFileSync(cookiesPath, COOKIES_DATA);
 
 app.get("/extract", async (req, res) => {
   let { url } = req.query;
@@ -12,13 +29,21 @@ app.get("/extract", async (req, res) => {
   }
 
   try {
-    const output = await ytDlp(url, {
+    const isYouTube = url.includes("youtube.com") || url.includes("youtu.be");
+
+    const options = {
       dumpSingleJson: true,
       noWarnings: true,
-      // YouTube Bot Check Bypass: Force iOS/Android client spoofing
-      extractorArgs: "youtube:player_client=ios,android,mweb",
       referer: url
-    });
+    };
+
+    // YouTube ke liye cookies aur updated player client spoofing pass karein
+    if (isYouTube) {
+      options.cookies = cookiesPath;
+      options.extractorArgs = "youtube:player_client=ios,android,web";
+    }
+
+    const output = await ytDlp(url, options);
 
     const videos = [];
     const audios = [];
@@ -76,7 +101,7 @@ app.get("/extract", async (req, res) => {
   } catch (err) {
     return res.status(500).json({
       status: "error",
-      message: "Extraction failed. Try passing YouTube cookies or check URL.",
+      message: "Extraction failed.",
       details: err.message
     });
   }
