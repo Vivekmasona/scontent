@@ -6,20 +6,19 @@ import path from "path";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// YAHAN APNI cookies.txt FILE KA POORA CONTENT PASTE KAREIN
+// Step 1 me exported cookie ka text content yahan paste karein
 const COOKIES_DATA = `# Netscape HTTP Cookie File
 # http://curl.haxx.se/rfc/cookie_spec.html
-# This is a generated file!  Do not edit.
+# Paste your raw youtube cookies content here...`;
 
-.youtube.com	TRUE	/	FALSE	1780000000	VISITOR_INFO1_LIVE	xxxxxxxx
-.youtube.com	TRUE	/	TRUE	1780000000	LOGIN_INFO	xxxxxxxx
-.youtube.com	TRUE	/	TRUE	1780000000	__Secure-3PAPISID	xxxxxxxx
-.youtube.com	TRUE	/	TRUE	1780000000	__Secure-3PSID	xxxxxxxx
-# Pasted remaining cookies here...`;
-
-// Render server par cookies.txt file generate karein
 const cookiesPath = path.join("/tmp", "cookies.txt");
-fs.writeFileSync(cookiesPath, COOKIES_DATA);
+
+// Render startup par cookies write karna
+try {
+  fs.writeFileSync(cookiesPath, COOKIES_DATA);
+} catch (e) {
+  console.error("Failed to write cookies file", e);
+}
 
 app.get("/extract", async (req, res) => {
   let { url } = req.query;
@@ -37,10 +36,11 @@ app.get("/extract", async (req, res) => {
       referer: url
     };
 
-    // YouTube ke liye cookies aur updated player client spoofing pass karein
     if (isYouTube) {
+      // Direct Cookies file pass karein
       options.cookies = cookiesPath;
-      options.extractorArgs = "youtube:player_client=ios,android,web";
+      // Bot check bypass karne ke liye android/ios client spoofing
+      options.extractorArgs = "youtube:player_client=ios,android,mweb";
     }
 
     const output = await ytDlp(url, options);
@@ -52,6 +52,7 @@ app.get("/extract", async (req, res) => {
       output.formats.forEach((fmt) => {
         if (!fmt.url) return;
 
+        // Video format collection
         if (fmt.vcodec && fmt.vcodec !== "none") {
           videos.push({
             format_id: fmt.format_id,
@@ -61,7 +62,9 @@ app.get("/extract", async (req, res) => {
             file_size_mb: fmt.filesize ? (fmt.filesize / (1024 * 1024)).toFixed(2) : "Unknown",
             download_url: fmt.url
           });
-        } else if (fmt.acodec && fmt.acodec !== "none") {
+        } 
+        // Audio format collection
+        else if (fmt.acodec && fmt.acodec !== "none") {
           audios.push({
             format_id: fmt.format_id,
             ext: fmt.ext,
@@ -73,6 +76,7 @@ app.get("/extract", async (req, res) => {
       });
     }
 
+    // Direct stream URL Fallback (Reels, TikTok, Shorts)
     if (videos.length === 0 && output.url) {
       videos.push({
         format_id: "best",
@@ -107,4 +111,4 @@ app.get("/extract", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Universal Extractor active on port ${PORT}`));
